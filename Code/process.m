@@ -1,0 +1,206 @@
+function[SLL_azi, SLL_ele, TX_array, RX_array, virtual_array, temp1, temp2] = process()
+%% Call Hyper parameter
+[ c, fc, Tc, fs, sample, numchirps, BW, S, numTX, numRX, SNR] = parameter_setup();
+lambda = c/fc;
+range_rel = c/2/BW; % range resolution (m)
+range_max = fs*c/2/S; % max range (m)
+velocity_rel = lambda/2/(Tc*numchirps);
+velocity_max = lambda/4/Tc;
+% azi_rel = 2/numRX/pi*180;
+% ele_rel = 2/numTX/pi*180;
+azi_rel = 1.22/numRX; %弳度
+%% Target (水平角 0~180度 仰角 0~180度)
+target1 = [20, 10, 0, 0]; %距離、速度、水平角、仰角
+%target2 = [30, 25, 10, 50]; %距離、速度、水平角、仰角
+%target3 = [50, 10, -30, 20]; %距離、速度、水平角、仰角
+target = [target1];
+numtarget = length(target(:,1));
+t1_location = [sind(target1(3))*target1(1), cosd(target1(3))*target1(1), sind(target1(4))*target1(1)];
+% t2_location = [sind(target2(3))*target2(1), cosd(target2(3))*target2(1), sind(target2(4))*target2(1)];
+% t3_location = [sind(target3(3))*target3(1), cosd(target3(3))*target3(1), sind(target3(4))*target3(1)];
+
+%% Antenna (uniform)
+% TX_distance = 0.5; %半波長
+% RX_distance = 0.5;
+% array_TX_x = [0, 0, 0, 0 ]; %location
+% array_TX_y = [1:numTX]*TX_distance;
+% array_RX_x = [1:numRX]*RX_distance; 
+% array_RX_y = [0, 0, 0, 0, 0, 0, 0, 0]; 
+
+%% Antenna (grid)
+% lambda1 = 1;
+% array_TX_x = 0.5*rand(1,numTX); %location
+% array_TX_y = [0:0.5:1.5] + 0.5*rand(1,numTX);
+% array_RX_x = [0:0.5:3.5] + 0.5*rand(1,numRX);
+% array_RX_y = 0.5*rand(1,numRX); %location
+
+%% Antenna (random)
+lambda1 = 1;
+array_TX_x = 5*rand(1,numTX); %location
+array_TX_y = 5*rand(1,numTX);
+array_RX_x = 5*rand(1,numRX);
+array_RX_y = 5*rand(1,numRX);
+
+virtual_x = zeros(1,numTX*numRX);
+count = 0;
+for i = 1:numTX
+    for j = 1:numRX
+        count = count+1;
+        virtual_x(1,count) = array_TX_x(i)+array_RX_x(j);
+        virtual_y(1,count) = array_TX_y(i)+array_RX_y(j);
+    end
+end
+TX_array = [array_TX_x; array_TX_y];
+RX_array = [array_RX_x; array_RX_y];
+virtual_array = [virtual_x;virtual_y];
+
+%% TX&RX signal
+GT = 10;  %發射天線增益 (dBi)
+GR = 10;  %接收天線增益 (dBi)
+t = 0:1/fs:Tc-1/fs;  %每個時刻Tc中的取樣點
+for i = 1:numchirps
+    for j = 1:numTX
+        Stx = GT*exp((1i*2*pi)*(fc*(t+(i-1)*Tc)+S/2*t.^2)); %發射訊號
+        for k = 1:numRX
+            SIF = zeros(1,sample);
+            for m = 1:numtarget
+                tau = 2*(target(m,1) + target(m,2)*(j-1)*Tc)/c;
+                fd = 2*target(m,2)/lambda1;
+                wx = ((j-1) *numRX+k)/2*sind(target(m,3));
+
+                small_scale = sqrt(1/2)*(randn(1,1)+1i*randn(1,1)); %small scale fading (Rayleigh)
+                PL = 20*log10(4*pi*target(m,1)/lambda1); 
+                PL = db2pow(PL);
+                Srx =  PL*small_scale*GR*exp((1i*2*pi)*((fc-fd)*(t-tau+(i-1)*Tc)+S/2*(t-tau).^2 + wx));  %接收訊號
+                Srx = awgn(Srx,SNR);
+                SIF = SIF + Stx .* conj(Srx);
+                
+            end
+            RD((j-1) * numRX + k,:,i) = SIF;
+        end
+    end
+end
+%% Range FFT
+RD_testchirp = reshape(RD(1,:,:),sample,numchirps);
+range_fft = fft(RD_testchirp, sample);
+range_fft = abs(range_fft ./ sample);
+% figure(1);
+% plot([0:sample-1]*range_rel,range_fft);
+%% 2D FFT (range doppler)
+Doppler_fft = fft2(RD_testchirp,sample,numchirps);
+Doppler_fft = [Doppler_fft(:,numchirps/2+1:end),Doppler_fft(:,1:numchirps/2)];
+RDM = abs(Doppler_fft);
+doppler_axis = (-numchirps/2:numchirps/2-1)*velocity_rel;
+range_axis = 0:range_rel:range_max-range_rel;
+
+numGuard = 1; % number of guard cells
+numTrain = numGuard*2; % number of training cells
+P_fa = 1e-5; % false alarm rate 
+SNR_OFFSET = -5; % dB
+RDM = abs(RDM);
+RDM_db =pow2db(RDM);
+
+
+
+%% 2D-DoA 估計 
+amplitude = ones(1,numtarget);
+steering = zeros(numTX,numRX);
+
+for i = 1:numtarget
+    for j = 1:numTX
+        for k = 1:numRX
+            steering(j,k) = steering(j,k) + amplitude(i)*exp( 1i*2*pi* ...
+            ((array_TX_x(j)+array_RX_x(k))*sind(target(i,3))+...
+            (array_TX_y(j)+array_RX_y(k))*sind(target(i,4))));
+        end
+    end
+end 
+index_RX = (-90:0.5:90)/180; 
+index_TX = (-90:0.5:90)/180; 
+x_axis = asind(index_RX/0.5);
+y_axis = asind(index_TX/0.5);
+% angle_fft = fftshift(fft(steering,length(x_axis),2),2);
+% angle_fft = fftshift(fft(angle_fft,length(y_axis),1),1);
+angle_fft = fft2(steering,length(x_axis),length(y_axis));
+angle_fft = abs(angle_fft/max(max(angle_fft)));
+angle_fft = 20*log10(angle_fft);
+angle_fft = [angle_fft(:,(length(y_axis)+1)/2:end),angle_fft(:,1:(length(y_axis)-1)/2)];
+angle_fft = [angle_fft((length(x_axis)+1)/2:end,:);angle_fft(1:(length(x_axis)-1)/2,:)]; %仰角
+
+%% Beam pattern
+phi0 = 0*pi/180; 
+theta0 = 0*pi/180;  
+eps = 0.0001; 
+NA = 360; 
+NE = 360; 
+
+phi = linspace(-pi/2,pi/2,NA) ; 
+theta = linspace(-pi/2,pi/2,NE) ; 
+virtual = virtual_x+sqrt (-1) .*virtual_y; 
+for i = 1:length (phi)
+    for j = 1:length(theta)  
+        pattern0 = exp(sqrt (-1) *2*pi/lambda1*(sin (phi(i))... 
+        *cos (theta(j))*real(virtual)+sin(theta(j))*imag(virtual))... 
+        -sin(phi0) *cos(theta0) *real (virtual) -sin(theta0) *imag (virtual)); 
+        pattern(i,j) = sum(sum(pattern0) ); 
+    end 
+end 
+max_p = max(max(abs (pattern))); 
+pattern_dbw = 20*log10(abs(pattern)/max_p+eps); 
+number = find(pattern_dbw<-50); 
+g_temp = -50+unifrnd(-1,1,1,length(number)); 
+for j = 1:length(number) 
+pattern_dbw(number(j)) = g_temp(j); 
+end 
+
+%% Find sidelobe level
+[SLL, side_peak] = sidelobe(pattern_dbw);
+
+%% 畫圖
+figure; %平面RD map
+imagesc(range_axis,doppler_axis,RDM_db');
+xlabel('Range(m)');
+ylabel('Velocity (m/s)');
+title('RD Map(2D)');
+
+figure; %立體RD map
+[X,Y] = meshgrid(doppler_axis,range_axis);
+mesh(Y,X,RDM_db);
+xlabel('Range (m)');
+ylabel('Velocity (m/s)');
+zlabel('Amplitude');
+title('RD Map');
+
+
+figure; %天線擺放圖
+scatter(array_TX_x,array_TX_y,'s','filled');hold on;
+scatter(array_RX_x,array_RX_y,'r','filled');hold on;
+scatter(virtual_x,virtual_y,'^');
+title('Antenna array');
+
+figure; %2D-DoA使用
+mesh(x_axis,y_axis,angle_fft);
+title('2D-DOA estimate');xlabel('azimuth (deg)');ylabel('elevation (deg)');
+
+figure; %水平、仰角
+mesh (theta*180/pi, phi*180/pi,pattern_dbw) ; 
+xlabel ('Elevation'); 
+ylabel ('Azithum'); 
+
+figure; %水平角
+temp1 = pattern_dbw(:, round (NE* ((pi/2-theta0)/pi)));
+[SLL_azi] = sidelobe_peak(temp1);
+plot(phi*180/pi,temp1); 
+grid;
+xlabel ('\phi azithum/');
+ylabel (' Gain (dB)'); 
+
+figure; %仰角
+temp2 = pattern_dbw (round (NA* ((pi/2-phi0)/pi)),:);
+[SLL_ele] = sidelobe_peak(temp2);
+plot (theta*180/pi,temp2); 
+grid; 
+xlabel('\theta elevation/');
+ylabel(' Gain (dB)'); 
+end
+

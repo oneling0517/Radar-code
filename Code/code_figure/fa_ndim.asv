@@ -1,0 +1,113 @@
+clc;close all;clear all;
+% parameters [n N_iteration alpha betamin gamma]
+n = 15; 
+MaxGeneration = 500; %跑一次20秒
+alpha = 0.5; 
+betamin = 0.2; 
+gamma = 1;
+para = [n MaxGeneration alpha betamin gamma];
+numTX = 6; %6
+numRX = 12; %12
+%% Create a set of random solutions to the problem
+[ns, array_design] = initial_location(n, numTX, numRX);
+%% 設定群心
+seed_num = 3;
+kx = zeros(seed_num,numTX+numRX);
+ky = zeros(seed_num,numTX+numRX);
+x = zeros(n,numTX+numRX);
+y = zeros(n,numTX+numRX);
+for p = 1:seed_num
+    kx(p,:) = numRX/2*rand(1,numTX+numRX); %location
+    ky(p,:) = numTX/2*rand(1,numTX+numRX); %location
+end
+for m = 1:n
+    x(m,:) = [ns(m,1:numTX), ns(m,2*numTX+1:2*numTX+numRX)];
+    y(m,:) = [ns(m,numTX+1:2*numTX), ns(m,2*numTX+numRX+1:end)];
+end
+%% K-means clustering
+[team newkx newky]= k_means(x, y, kx, ky, seed_num);
+
+%% Calculate the fitness function
+F = cost(n, array_design);
+
+%% Group
+team_index = cell(1,seed_num);
+for i = 1:seed_num
+    [t_index,v] = find(team==i);
+    team_index{1,i} = t_index;
+end
+team_F = cell(1,seed_num);
+team_ns = cell(1,seed_num);
+for i = 1:seed_num
+    tmp_idx = team_index{1,i};
+    tmp_matrix = zeros(1,length(tmp_idx));
+    tmp_ns = zeros(length(tmp_idx),length(ns));
+    for k = 1:length(tmp_idx)
+        tmp_matrix(1,k) = F(tmp_idx(k));
+        team_F{1,i} = tmp_matrix;
+        tmp_ns(k,:) = ns(tmp_idx(k),:);
+        team_ns{1,i}  = tmp_ns;
+    end
+end
+
+%% Ranking fireflies by their light intensity/objectives
+Light = cell(1,seed_num);
+Index = cell(1,seed_num);
+for i = 1:seed_num
+    [L,I] = sort(team_F{1,i}); % 越小越亮
+    Light{1,i} = L;
+    Index{1,i} = I;
+end
+
+for i = 1:seed_num
+    nn = zeros(length(Index{1,i}),length(ns));
+    for j = 1:length(Index{1,i})
+        ns_tmp = team_ns{1,i};
+        ind = Index{1,i};
+        nn(j,:) = ns_tmp(ind(j),:);
+    end
+    team_ns{1,i} = nn;
+end
+
+%% Start iteration
+for m = 1:seed_num
+    ns = team_ns{1,m};
+    Lightn = Light{1,m};
+    F_self = team_F{1,m};
+    num = length(Index{1,m}); %一組裡有多少個螢火蟲
+    light_record = zeros(1,501); %紀錄每次迭代亮度，看分幾組
+    light_record(1,1) = Lightn(1);
+
+for k=1:MaxGeneration % 迭代500次
+    alpha = alpha_new(alpha,MaxGeneration); % 根據迭代改變alpha值
+    
+    %% Find the current best
+    ns0 = ns; 
+    Light0 = Lightn;
+    nbest = ns(1,:); % 最好的位置
+    Lightbest = Lightn(1);
+    % For output only
+    fbest=Lightbest;
+    [ns] = fa_move(num,ns,Lightn,ns0,Light0,alpha,betamin,gamma);
+    %% Calculate virtual array to calculate the fitness function
+    [ns, virtual_array_iter] = cal_location(num, ns, numTX, numRX);
+    %% Calculate the fitness function
+    [F_self] = cost(num, virtual_array_iter);
+
+    %% Ranking fireflies by their light intensity/objectives
+    [Lightn2,Index2] = sort(F_self); % 越小越亮
+    ns_tmp = ns;
+    for i = 1:num
+        ns(i,:) = ns_tmp(Index2(i),:);
+    end
+    light_record(1,k+1) = Lightn2(1);
+end
+    
+%% Best solution
+nbest_pos = ns(1,:);
+nLightbest = Lightn(1);
+
+end
+
+save('nbest.mat','nbest'); %去beam pattern計算跟畫圖
+save('light_record.mat','light_record'); 
